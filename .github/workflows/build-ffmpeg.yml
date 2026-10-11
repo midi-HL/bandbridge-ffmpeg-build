@@ -1,0 +1,174 @@
+name: build-ffmpeg
+
+# Builds libbandbridge_ffmpeg.so for the two ABIs the app ships (armeabi and
+# armeabi-v7a) and uploads them as artifacts.
+#
+# WHY THIS RUNS HERE AND NOT ON THE DEV MACHINE
+# ---------------------------------------------
+# The target device is a 830MHz ARMv6 Galaxy Y, so the toolchain is pinned to
+# NDK r16b - the last NDK that still emits the legacy `armeabi` (ARMv5TE,
+# soft-float) ABI, which was removed in r17. r16b is an 852MB download that
+# unpacks to ~2.6GB, and the development container has ~2GB free, so extraction
+# fails there with ENOSPC. A GitHub runner has both the disk and the CPU.
+#
+# This is a build-only workflow: it does not build the APK. The .so files are
+# downloaded and dropped into the app at app/src/main/jniLibs/<abi>/.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ffmpeg_version:
+        description: 'FFmpeg version to build'
+        required: false
+        default: '3.4.13'
+      abis:
+        description: 'Space-separated ABIs'
+        required: false
+        default: 'armeabi armeabi-v7a'
+  push:
+    branches: [main]
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Static checks first. They take seconds; the FFmpeg build takes ~20
+  # minutes. Finding a typo in the shim after paying for the build would be
+  # a waste of everyone's time, so the shim is compiled against the host's
+  # libav* headers before the cross build starts.
+  # ---------------------------------------------------------------------
+  preflight:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install FFmpeg dev headers (for the shim syntax check)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libavcodec-dev libavformat-dev libavutil-dev
+
+      - name: Compile the JNI shim (stub configuration)
+        run: |
+          gcc -fsyntax-only -Wall -Wextra \
+            -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+            app/src/main/jni/bandbridge_ffmpeg.c
+          echo "stub configuration compiles"
+
+      - name: Compile the JNI shim (FFmpeg configuration)
+        run: |
+          gcc -fsyntax-only -Wall -Wextra -DBANDBRIDGE_HAVE_FFMPEG \
+            -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+            $(pkg-config --cflags libavcodec libavformat libavutil) \
+            app/src/main/jni/bandbridge_ffmpeg.c
+          echo "FFmpeg configuration compiles"
+
+      - name: Compile the JNI shim under -std=gnu89
+        # NDK r16b's GCC 4.9 defaults to gnu89. Catching a C99-ism here is
+        # much cheaper than in the cross build.
+        run: |
+          gcc -fsyntax-only -std=gnu89 \
+            -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+            app/src/main/jni/bandbridge_ffmpeg.c
+          echo "gnu89 compiles"
+
+      - name: Check that every native method has a matching JNI symbol
+        # A Java `native` declaration with no C implementation is a library
+        # that loads fine and then throws UnsatisfiedLinkError on first use -
+        # the worst failure mode, because the app reports the decoder as
+        # "available". This asserts the two sides agree by name.
+        run: |
+          set -e
+          SHIM=app/src/main/jni/bandbridge_ffmpeg.c
+          for m in nativeVersion nativeProbe nativeDecodeToPcm; do
+            if ! grep -q "JNI_FN($m)" "$SHIM"; then
+              echo "MISSING JNI symbol for $m" >&2
+              exit 1
+            fi
+            echo "ok: $m"
+          done
+
+  build:
+    needs: preflight
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [armeabi, armeabi-v7a]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential curl xz-utils
+
+      - name: Cache NDK r16b
+        id: ndk-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/android-ndk-r16b
+          key: ndk-r16b-linux-x86_64-v1
+
+      - name: Download NDK r16b
+        if: steps.ndk-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          curl -fL --retry 3 -o /tmp/ndk.zip \
+            https://dl.google.com/android/repository/android-ndk-r16b-linux-x86_64.zip
+          # The archive already contains a top-level android-ndk-r16b/, so
+          # extracting into /opt lands it exactly where the cache key expects.
+          sudo unzip -q /tmp/ndk.zip -d /opt
+          test -x /opt/android-ndk-r16b/ndk-build || {
+            echo "unexpected NDK layout after extraction"; ls /opt; exit 1; }
+          rm -f /tmp/ndk.zip
+
+      - name: Verify the NDK layout
+        # The build script finds its toolchain by looking for the compiler
+        # binary. If r16b's layout is not what it expects, fail here with a
+        # clear message rather than 15 minutes into a configure log.
+        run: |
+          set -e
+          NDK=/opt/android-ndk-r16b
+          test -d "$NDK" || { echo "no NDK at $NDK"; exit 1; }
+          echo "--- toolchains ---"
+          ls "$NDK/toolchains"
+          echo "--- looking for arm-linux-androideabi-gcc ---"
+          found=$(find "$NDK/toolchains" -name 'arm-linux-androideabi-gcc' -type f | head -1)
+          test -n "$found" || { echo "no arm-linux-androideabi-gcc under $NDK"; exit 1; }
+          echo "found: $found"
+          echo "--- sysroot ---"
+          ls -d "$NDK/sysroot" 2>/dev/null || echo "no unified sysroot"
+          echo "--- armv5te headers present? ---"
+          ls -d "$NDK/sysroot/usr/include/arm-linux-androideabi" 2>/dev/null || \
+            echo "no arch header dir (script will fall back)"
+
+      - name: Build ${{ matrix.abi }}
+        env:
+          ANDROID_NDK: /opt/android-ndk-r16b
+          ABIS: ${{ matrix.abi }}
+          JOBS: '2'
+          FFMPEG_VERSION: ${{ github.event.inputs.ffmpeg_version || '3.4.13' }}
+        run: |
+          set -e
+          chmod +x scripts/build-ffmpeg.sh
+          # The script resolves paths relative to itself; SHIM and OUT_ROOT
+          # point at this checkout, which holds the same shim as the app.
+          ./scripts/build-ffmpeg.sh
+
+      - name: Verify the artifact
+        run: |
+          set -e
+          SO="app/src/main/jniLibs/${{ matrix.abi }}/libbandbridge_ffmpeg.so"
+          test -f "$SO" || { echo "no .so at $SO"; exit 1; }
+          ls -la "$SO"
+          file "$SO"
+          echo "--- exported JNI symbols ---"
+          nm -D --defined-only "$SO" | grep -i 'Java_com_astralight' || {
+            echo "NO JNI SYMBOLS EXPORTED - the .so would load and do nothing"; exit 1; }
+          echo "--- dynamic dependencies ---"
+          readelf -d "$SO" | grep NEEDED
+
+      - name: Upload ${{ matrix.abi }} library
+        uses: actions/upload-artifact@v4
+        with:
+          name: libbandbridge_ffmpeg-${{ matrix.abi }}
+          path: app/src/main/jniLibs/${{ matrix.abi }}/libbandbridge_ffmpeg.so
+          if-no-files-found: error

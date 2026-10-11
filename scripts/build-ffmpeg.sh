@@ -236,10 +236,29 @@ build_abi() {
             --extra-ldflags="$extra_ld" \
             > "$WORK/configure-$abi.log" 2>&1
     ) || {
-        echo "configure failed for $abi. Last 40 lines of the log:" >&2
-        echo "---------------- ---------------- ----------------" >&2
-        tail -40 "$WORK/configure-$abi.log" >&2
-        echo "---------------- ---------------- ----------------" >&2
+        echo "configure failed for $abi." >&2
+        echo "---- configure output (tail) ----" >&2
+        tail -25 "$WORK/configure-$abi.log" >&2
+        # The reason "C compiler test failed" is NOT in configure's stdout: it
+        # is the compiler's own stderr, written to ffbuild/config.log. Without
+        # this the message names the symptom and nothing else, which is what
+        # sent the first CI run chasing flags that were fine.
+        if [ -f "$build/ffbuild/config.log" ]; then
+            echo "---- config.log (tail, the actual compiler error) ----" >&2
+            tail -40 "$build/ffbuild/config.log" >&2
+        fi
+        echo "---- reproduce the compiler test by hand ----" >&2
+        cat > "$WORK/t.c" <<'EOF_T'
+#include <stdio.h>
+int main(void){return 0;}
+EOF_T
+        echo "$ $toolchain/bin/$host-gcc --sysroot=$sysroot -isystem $sysroot/usr/include/$host -c $WORK/t.c -o $WORK/t.o" >&2
+        "$toolchain/bin/$host-gcc" --sysroot="$sysroot" \
+            -isystem "$sysroot/usr/include/$host" -c "$WORK/t.c" -o "$WORK/t.o" 2>&1 \
+            | head -20 >&2 || true
+        echo "---- host headers present? ----" >&2
+        ls "$sysroot/usr/include/$host" 2>&1 | head -5 >&2
+        ls "$sysroot/usr/include/stdio.h" 2>&1 >&2
         echo "full log: $WORK/configure-$abi.log" >&2
         return 1
     }

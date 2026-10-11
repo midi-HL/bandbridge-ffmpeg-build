@@ -128,6 +128,34 @@ PARSERS="flac,opus,vorbis,aac,mpegaudio"
 # what the GitHub Actions workflow does, building only the .so from a small
 # repo that does not contain the app sources.
 SHIM="${SHIM:-$ROOT/app/src/main/jni/bandbridge_ffmpeg.c}"
+
+# The JNI shim includes <jni.h>, which ships with the JDK, not the NDK. On a
+# developer machine JAVA_HOME is usually exported; on a bare CI runner it is
+# not, and the shim then fails with "jni.h: No such file or directory" only
+# AFTER the whole of FFmpeg has been built - the most expensive possible moment
+# to discover a missing include. So it is resolved up front, before the build.
+JNI_INCLUDE=""
+find_jni_headers() {
+    local home="$1"
+    if [ -n "$home" ] && [ -f "$home/include/jni.h" ]; then
+        JNI_INCLUDE="$home/include $home/include/linux"
+        return 0
+    fi
+    return 1
+}
+if ! find_jni_headers "$JAVA_HOME"; then
+    for candidate in /usr/lib/jvm/* /opt/jdk/* /opt/java/* /usr/java/*; do
+        if [ -d "$candidate" ] && find_jni_headers "$candidate"; then
+            break
+        fi
+    done
+fi
+if [ -z "$JNI_INCLUDE" ]; then
+    echo "ERROR: cannot find jni.h. Set JAVA_HOME to a JDK (not a JRE)." >&2
+    echo "Looked in: \$JAVA_HOME, /usr/lib/jvm/*, /opt/jdk/*, /opt/java/*" >&2
+    exit 2
+fi
+echo "jni.h:    $JNI_INCLUDE"
 OUT_ROOT="${OUT_ROOT:-$ROOT/app/src/main/jniLibs}"
 
 build_abi() {
@@ -380,6 +408,7 @@ EOF_T
         -DBANDBRIDGE_HAVE_FFMPEG \
         -I"$prefix/include" \
         -I"$SRC" \
+        $(for d in $JNI_INCLUDE; do printf ' -I%s' "$d"; done) \
         "$shim" \
         -Wl,--whole-archive \
         "$prefix/lib/libavcodec.a" "$prefix/lib/libavformat.a" \

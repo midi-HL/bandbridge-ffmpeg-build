@@ -140,6 +140,17 @@ jobs:
           ls -d "$NDK/sysroot/usr/include/arm-linux-androideabi" 2>/dev/null || \
             echo "no arch header dir (script will fall back)"
 
+      - name: Locate the JDK's JNI headers
+        # The shim includes <jni.h>. Ubuntu runners have a JDK but do not
+        # export JAVA_HOME by default; the script searches common locations and
+        # this makes the search succeed deterministically.
+        run: |
+          set -e
+          JH=$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")
+          echo "JAVA_HOME=$JH" >> "$GITHUB_ENV"
+          test -f "$JH/include/jni.h" || { echo "no jni.h under $JH"; exit 1; }
+          echo "jni.h found under $JH"
+
       - name: Build ${{ matrix.abi }}
         env:
           ANDROID_NDK: /opt/android-ndk-r16b

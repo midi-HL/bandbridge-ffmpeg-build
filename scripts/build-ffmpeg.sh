@@ -159,8 +159,11 @@ build_abi() {
     if [ -z "$toolchain" ]; then
         echo "ERROR: no toolchain under $NDK/toolchains contains bin/$host-gcc" >&2
         echo "r16b keeps its GCC tree in toolchains/<target>-4.9/prebuilt/." >&2
+        echo "Available toolchains:" >&2
+        ls "$NDK/toolchains" >&2 || true
         exit 2
     fi
+    echo "toolchain: $toolchain"
 
     local api=14   # minSdkVersion
 
@@ -194,6 +197,16 @@ build_abi() {
     rm -rf "$prefix" "$build"
     mkdir -p "$prefix" "$build"
 
+    # Prove the compiler runs before asking FFmpeg to use it. A dead or
+    # mis-symlinked cross-gcc makes configure fail with a message that points
+    # at the C library rather than the compiler.
+    if ! "$toolchain/bin/$host-gcc" --version >/dev/null 2>&1; then
+        echo "ERROR: $toolchain/bin/$host-gcc is not runnable" >&2
+        exit 2
+    fi
+    echo "compiler: $("$toolchain/bin/$host-gcc" --version 2>&1 | head -1)"
+    echo "sysroot:  $sysroot"
+
     echo "=== configuring $abi ==="
     (
         cd "$build"
@@ -222,11 +235,24 @@ build_abi() {
             --extra-cflags="-fPIC -O2 -DANDROID -D__ANDROID_API__=$api -isystem $sysroot/usr/include/$host $extra" \
             --extra-ldflags="$extra_ld" \
             > "$WORK/configure-$abi.log" 2>&1
-    ) || { echo "configure failed for $abi; see $WORK/configure-$abi.log" >&2; return 1; }
+    ) || {
+        echo "configure failed for $abi. Last 40 lines of the log:" >&2
+        echo "---------------- ---------------- ----------------" >&2
+        tail -40 "$WORK/configure-$abi.log" >&2
+        echo "---------------- ---------------- ----------------" >&2
+        echo "full log: $WORK/configure-$abi.log" >&2
+        return 1
+    }
 
     echo "=== building $abi ==="
     make -C "$build" -j"${JOBS:-2}" > "$WORK/make-$abi.log" 2>&1 \
-        || { echo "make failed for $abi; see $WORK/make-$abi.log" >&2; return 1; }
+        || {
+            echo "make failed for $abi. Last 40 lines:" >&2
+            echo "---------------- ---------------- ----------------" >&2
+            tail -40 "$WORK/make-$abi.log" >&2
+            echo "full log: $WORK/make-$abi.log" >&2
+            return 1
+        }
     make -C "$build" install >> "$WORK/make-$abi.log" 2>&1
 
     # -----------------------------------------------------------------------

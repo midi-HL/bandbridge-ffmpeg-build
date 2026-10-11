@@ -249,7 +249,6 @@ build_abi() {
             --enable-cross-compile \
             --cross-prefix="$toolchain/bin/$host-" \
             --sysroot="$sysroot" \
-            $([ -n "$unified_inc" ] && echo "-isystem $unified_inc -isystem $arch_inc") \
             --enable-static \
             --disable-shared \
             --disable-programs \

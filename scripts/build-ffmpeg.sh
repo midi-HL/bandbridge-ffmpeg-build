@@ -186,8 +186,19 @@ build_abi() {
     esac
     local extra=""
     local extra_ld=""
+    local arch_flags=""
+    local configure_cpu_flags=""
     if [ "$abi" = "armeabi-v7a" ]; then
-        extra="--enable-neon --enable-thumb"
+        # NEON and Thumb are CONFIGURE options, not compiler flags. Passing them
+        # in --extra-cflags (as this script first did) makes gcc parse them as
+        # "-fenable neon", which fails with "unknown pass neon" - and configure
+        # reports that only as "C compiler test failed", naming the symptom and
+        # hiding the cause. They belong on the configure line.
+        configure_cpu_flags="--enable-neon --enable-thumb"
+        # -mfpu/-mfloat-abi are compiler flags, and are what actually make the
+        # code use NEON/VFP. Without them --enable-neon selects NEON code paths
+        # that the compiler then cannot emit.
+        arch_flags="-mfpu=neon-vfpv4 -mfloat-abi=softfp"
         # Only valid for ARMv7: the linker errors out on armv5te.
         extra_ld="-Wl,--fix-cortex-a8"
     fi
@@ -232,7 +243,8 @@ build_abi() {
             --enable-demuxer="$DEMUXERS" \
             --enable-parser="$PARSERS" \
             --enable-protocol=file \
-            --extra-cflags="-fPIC -O2 -DANDROID -D__ANDROID_API__=$api -isystem $sysroot/usr/include/$host $extra" \
+            $configure_cpu_flags \
+            --extra-cflags="-fPIC -O2 -DANDROID -D__ANDROID_API__=$api -isystem $sysroot/usr/include/$host $arch_flags" \
             --extra-ldflags="$extra_ld" \
             > "$WORK/configure-$abi.log" 2>&1
     ) || {

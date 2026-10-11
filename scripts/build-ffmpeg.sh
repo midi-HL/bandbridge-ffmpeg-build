@@ -238,6 +238,23 @@ build_abi() {
     done
     echo "CRT + libc: present"
 
+    # -U_FILE_OFFSET_BITS: NDK r16b marks mmap() as an error under
+    # _FILE_OFFSET_BITS=64 for API < 21, and FFmpeg's configure sets that macro
+    # unconditionally (check_cppflags -D_FILE_OFFSET_BITS=64). This is not
+    # confined to optional code - it hits core files such as libavutil/file.c,
+    # so it cannot be avoided by disabling components. Raising the API level is
+    # not an option either: minSdk is 10.
+    #
+    # Why -U works: ffbuild/common.mak defines
+    #     CCFLAGS = $(CPPFLAGS) $(CFLAGS)
+    # so CPPFLAGS (which carries configure's -D) is expanded FIRST and the -U
+    # from --extra-cflags (which lands in CFLAGS) comes after it. The last
+    # definition wins, so the macro ends up undefined before any header is read.
+    #
+    # The cost is 32-bit off_t, i.e. a 2GB per-file limit. That is irrelevant
+    # here: this decoder reads audio files on a device with a 290MB RAM budget
+    # and a 64MB PCM ceiling.
+
     # --disable-v4l2_m2m: v4l2 is both useless and unbuildable here.
     #   * Useless: the target is a Galaxy Y (ARMv6, API 10) - no V4L2 M2M, no
     #     MediaCodec. The app decodes to PCM in software.
@@ -286,7 +303,7 @@ build_abi() {
             --enable-parser="$PARSERS" \
             --enable-protocol=file \
             $configure_cpu_flags \
-            --extra-cflags="-fPIC -O2 -DANDROID -D__ANDROID_API__=$api $([ -n "$unified_inc" ] && echo "-isystem $unified_inc -isystem $arch_inc") $arch_flags" \
+            --extra-cflags="-fPIC -O2 -DANDROID -D__ANDROID_API__=$api -U_FILE_OFFSET_BITS $([ -n "$unified_inc" ] && echo "-isystem $unified_inc -isystem $arch_inc") $arch_flags" \
             --extra-ldflags="$extra_ld" \
             > "$WORK/configure-$abi.log" 2>&1
     ) || {

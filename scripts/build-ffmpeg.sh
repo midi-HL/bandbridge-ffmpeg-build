@@ -408,6 +408,7 @@ EOF_T
         -DBANDBRIDGE_HAVE_FFMPEG \
         -I"$prefix/include" \
         -I"$SRC" \
+        $([ -n "$unified_inc" ] && echo "-isystem $unified_inc -isystem $arch_inc") \
         $(for d in $JNI_INCLUDE; do printf ' -I%s' "$d"; done) \
         "$shim" \
         -Wl,--whole-archive \

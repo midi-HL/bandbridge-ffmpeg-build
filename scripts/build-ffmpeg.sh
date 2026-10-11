@@ -238,8 +238,7 @@ build_abi() {
     done
     echo "CRT + libc: present"
 
-    # --disable-hwaccels: hardware acceleration is both useless and unbuildable
-    # here.
+    # --disable-v4l2_m2m: v4l2 is both useless and unbuildable here.
     #   * Useless: the target is a Galaxy Y (ARMv6, API 10) - no V4L2 M2M, no
     #     MediaCodec. The app decodes to PCM in software.
     #   * Unbuildable: v4l2_buffers.c calls mmap(), and NDK r16b's headers
@@ -247,13 +246,18 @@ build_abi() {
     #     configure) with "mmap is not available with _FILE_OFFSET_BITS=64 when
     #     using GCC until android-21". Raising the API level is not an option:
     #     minSdk is 10.
-    # v4l2_m2m is in HWACCEL_AUTODETECT_LIBRARY_LIST, so this one flag drops
-    # v4l2_buffers.o and the rest of the v4l2 family with it.
+    #
+    # WHY NOT --disable-hwaccels: it was tried first and does not work.
+    # HWACCEL_LIST is built by find_things() from libavcodec/allcodecs.c, and
+    # that file contains no v4l2_m2m entry - so --disable-hwaccels cannot reach
+    # v4l2_m2m, and v4l2_buffers.o is still compiled. The specific option is
+    # documented at configure line 188. Verified by counting occurrences of
+    # v4l2_m2m in allcodecs.c (zero).
     #
     # NOTE: this explanation lives here rather than beside the flag because a
     # '#' inside a backslash-continued argument list is an ARGUMENT, not a
     # comment - the lines are joined before parsing, so a comment there gets
-    # executed as a command. That mistake cost one CI run.
+    # executed as a command. That mistake also cost a CI run.
 
     echo "=== configuring $abi ==="
     (
@@ -275,7 +279,7 @@ build_abi() {
             --disable-swresample \
             --disable-avfilter \
             --disable-network \
-            --disable-hwaccels \
+            --disable-v4l2_m2m \
             --disable-everything \
             --enable-decoder="$DECODERS" \
             --enable-demuxer="$DEMUXERS" \
@@ -315,6 +319,15 @@ EOF_T
     }
 
     echo "=== building $abi ==="
+    # Assert the option was honoured rather than ignored. The previous attempt
+    # used a flag that configure accepted without acting on, and the failure
+    # surfaced 40 seconds later as an unrelated-looking mmap error.
+    if grep -qE '^CONFIG_V4L2_M2M=yes' "$build/config.mak" 2>/dev/null; then
+        echo "ERROR: CONFIG_V4L2_M2M=yes despite --disable-v4l2_m2m" >&2
+        exit 2
+    fi
+    echo "v4l2_m2m: disabled (config.mak)"
+
     make -C "$build" -j"${JOBS:-2}" > "$WORK/make-$abi.log" 2>&1 \
         || {
             echo "make failed for $abi. Last 40 lines:" >&2

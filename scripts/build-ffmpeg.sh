@@ -238,6 +238,23 @@ build_abi() {
     done
     echo "CRT + libc: present"
 
+    # --disable-hwaccels: hardware acceleration is both useless and unbuildable
+    # here.
+    #   * Useless: the target is a Galaxy Y (ARMv6, API 10) - no V4L2 M2M, no
+    #     MediaCodec. The app decodes to PCM in software.
+    #   * Unbuildable: v4l2_buffers.c calls mmap(), and NDK r16b's headers
+    #     reject it under _FILE_OFFSET_BITS=64 (set unconditionally by FFmpeg's
+    #     configure) with "mmap is not available with _FILE_OFFSET_BITS=64 when
+    #     using GCC until android-21". Raising the API level is not an option:
+    #     minSdk is 10.
+    # v4l2_m2m is in HWACCEL_AUTODETECT_LIBRARY_LIST, so this one flag drops
+    # v4l2_buffers.o and the rest of the v4l2 family with it.
+    #
+    # NOTE: this explanation lives here rather than beside the flag because a
+    # '#' inside a backslash-continued argument list is an ARGUMENT, not a
+    # comment - the lines are joined before parsing, so a comment there gets
+    # executed as a command. That mistake cost one CI run.
+
     echo "=== configuring $abi ==="
     (
         cd "$build"
@@ -258,6 +275,7 @@ build_abi() {
             --disable-swresample \
             --disable-avfilter \
             --disable-network \
+            --disable-hwaccels \
             --disable-everything \
             --enable-decoder="$DECODERS" \
             --enable-demuxer="$DEMUXERS" \

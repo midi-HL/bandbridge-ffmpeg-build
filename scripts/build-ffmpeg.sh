@@ -170,13 +170,22 @@ build_abi() {
     # r14 unified the sysroot and removed the per-toolchain copy. Detect which
     # layout this NDK uses rather than assuming: r16b (our pin) is unified, but
     # the script also runs against an older NDK if someone points it there.
-    local sysroot="$NDK/sysroot"
-    if [ ! -d "$sysroot" ]; then
-        sysroot="$toolchain/sysroot"
-    fi
-    if [ ! -d "$sysroot" ]; then
-        echo "ERROR: no sysroot found at $NDK/sysroot or $toolchain/sysroot" >&2
+    # Libraries and CRT objects come from the PLATFORM dir, not $NDK/sysroot.
+    local sysroot="$NDK/platforms/android-$api/arch-arm"
+    if [ ! -d "$sysroot/usr/lib" ]; then
+        echo "ERROR: no platform libs at $sysroot/usr/lib" >&2
+        echo "Available platform dirs:" >&2
+        ls "$NDK/platforms" >&2 || true
         exit 2
+    fi
+    # Headers were unified into $NDK/sysroot in r14 and are NOT in the platform
+    # dir any more, so they must be added explicitly.
+    local unified_inc="$NDK/sysroot/usr/include"
+    local arch_inc="$unified_inc/arm-linux-androideabi"
+    if [ ! -f "$unified_inc/stdio.h" ]; then
+        # Pre-r14: headers live in the platform dir, where --sysroot points.
+        unified_inc=""
+        arch_inc=""
     fi
     local cpu
     case "$abi" in
@@ -216,7 +225,18 @@ build_abi() {
         exit 2
     fi
     echo "compiler: $("$toolchain/bin/$host-gcc" --version 2>&1 | head -1)"
-    echo "sysroot:  $sysroot"
+    echo "sysroot:  $sysroot  (libs + CRT)"
+    echo "includes: ${unified_inc:-<in sysroot>}"
+    # The exact files whose absence produced the link failure. Named here so a
+    # layout surprise is reported now, not 200 lines into a configure log.
+    for f in crtbegin_dynamic.o crtend_android.o libc.so; do
+        if [ ! -e "$sysroot/usr/lib/$f" ]; then
+            echo "ERROR: $sysroot/usr/lib/$f is missing" >&2
+            ls "$sysroot/usr/lib" | head -30 >&2
+            exit 2
+        fi
+    done
+    echo "CRT + libc: present"
 
     echo "=== configuring $abi ==="
     (
@@ -229,6 +249,7 @@ build_abi() {
             --enable-cross-compile \
             --cross-prefix="$toolchain/bin/$host-" \
             --sysroot="$sysroot" \
+            $([ -n "$unified_inc" ] && echo "-isystem $unified_inc -isystem $arch_inc") \
             --enable-static \
             --disable-shared \
             --disable-programs \
@@ -244,7 +265,7 @@ build_abi() {
             --enable-parser="$PARSERS" \
             --enable-protocol=file \
             $configure_cpu_flags \
-            --extra-cflags="-fPIC -O2 -DANDROID -D__ANDROID_API__=$api -isystem $sysroot/usr/include/$host $arch_flags" \
+            --extra-cflags="-fPIC -O2 -DANDROID -D__ANDROID_API__=$api $([ -n "$unified_inc" ] && echo "-isystem $unified_inc -isystem $arch_inc") $arch_flags" \
             --extra-ldflags="$extra_ld" \
             > "$WORK/configure-$abi.log" 2>&1
     ) || {
@@ -264,13 +285,14 @@ build_abi() {
 #include <stdio.h>
 int main(void){return 0;}
 EOF_T
-        echo "$ $toolchain/bin/$host-gcc --sysroot=$sysroot -isystem $sysroot/usr/include/$host -c $WORK/t.c -o $WORK/t.o" >&2
+        echo "$ $toolchain/bin/$host-gcc --sysroot=$sysroot -isystem $unified_inc -c $WORK/t.c" >&2
         "$toolchain/bin/$host-gcc" --sysroot="$sysroot" \
-            -isystem "$sysroot/usr/include/$host" -c "$WORK/t.c" -o "$WORK/t.o" 2>&1 \
-            | head -20 >&2 || true
-        echo "---- host headers present? ----" >&2
-        ls "$sysroot/usr/include/$host" 2>&1 | head -5 >&2
-        ls "$sysroot/usr/include/stdio.h" 2>&1 >&2
+            $([ -n "$unified_inc" ] && echo "-isystem $unified_inc -isystem $arch_inc") \
+            -c "$WORK/t.c" -o "$WORK/t.o" 2>&1 | head -20 >&2 || true
+        echo "---- libs present? ----" >&2
+        ls "$sysroot/usr/lib" 2>&1 | head -8 >&2
+        echo "---- headers present? ----" >&2
+        ls "${unified_inc:-$sysroot/usr/include}" 2>&1 | head -5 >&2
         echo "full log: $WORK/configure-$abi.log" >&2
         return 1
     }
